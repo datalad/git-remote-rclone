@@ -56,6 +56,13 @@ At the moment no locking is performed that would prevent simultaneous
 (conflicting) updates from two end points. But this should be straightforward
 to add support for.
 
+7-Zip archives of bare repositories are the only supported format for the
+remote at the moment (they provide a good trade-off between size and
+operational complexity). However, it would not be very effortful to support
+additional archive formats (e.g. plain ZIP with Python's built-in `zipfile`
+module), or a (compressed)
+[fast-import](https://www.git-scm.com/docs/git-fast-import)-compatible stream.
+
 ## Support
 
 All bugs, concerns and enhancement requests for this software can be submitted here:
