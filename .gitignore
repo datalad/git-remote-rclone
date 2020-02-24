@@ -1,0 +1,6 @@
+build
+dist
+*.egg-info
+*.swp
+**/__pycache__
+pip-wheel-metadata/
