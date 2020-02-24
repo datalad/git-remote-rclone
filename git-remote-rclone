@@ -71,8 +71,8 @@ class RCloneRemote(object):
         )
         if cat.returncode:
             # listing failed, nothing there
-            return
-        return cat.stdout
+            return ''
+        return cat.stdout if cat.stdout else ''
 
     def get_remote_state(self):
         """Return a dict with hashes for the remote repo archive or None
