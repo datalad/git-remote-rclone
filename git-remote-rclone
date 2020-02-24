@@ -10,18 +10,17 @@
 """
 """
 
-import sys
+import json
 import os
 from pathlib import Path
-import subprocess
-from urllib.parse import urlparse
-import json
 from shutil import rmtree
-
-
+import subprocess
+import sys
+from urllib.parse import urlparse
 
 
 class RCloneRemote(object):
+    """git-remote-helper implementation to interface rclone remotes."""
     def __init__(self,
                  gitdir,
                  remote,
@@ -29,6 +28,23 @@ class RCloneRemote(object):
                  instream=sys.stdin,
                  outstream=sys.stdout,
                  errstream=sys.stderr):
+        """
+        Parameters
+        ----------
+        gitdir : str
+          Path to the GITDIR of the repository to operate on (provided
+          by Git).
+        remote : str
+          Remote label to use (provided by Git).
+        url : str
+          rclone://-type URL of the remote (provided by Git).
+        instream :
+          Stream to read communication from Git from.
+        outstream :
+          Stream to communicate outcomes to Git.
+        errstream :
+          Stream for logging.
+        """
         self.parsed_url = urlparse(url)
         self.remote = remote
         # internal logic relies on workdir to be an absolute path
