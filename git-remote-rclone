@@ -129,6 +129,9 @@ class RCloneRemote(object):
             # in case we never sync'ed, obtain the ID info prior download
             # so we have it, whenever the download succeeded
             repo_hashes = self.get_remote_state()
+        if repo_hashes is None:
+            # there is nothing at the remote end
+            return
         sync_dir = self.workdir / 'sync'
         self.log('Downloading repository archive')
         subprocess.run([
