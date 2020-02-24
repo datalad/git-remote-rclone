@@ -1,0 +1,260 @@
+#!/usr/bin/env python
+## emacs: -*- mode: python; py-indent-offset: 4; tab-width: 4; indent-tabs-mode: nil -*-
+# ex: set sts=4 ts=4 sw=4 noet:
+# ## ### ### ### ### ### ### ### ### ### ### ### ### ### ### ### ### ### ### ##
+#
+#   See COPYING file distributed along with the datalad package for the
+#   copyright and license terms.
+#
+# ## ### ### ### ### ### ### ### ### ### ### ### ### ### ### ### ### ### ### ##
+"""
+"""
+
+import sys
+import os
+from pathlib import Path
+import subprocess
+from urllib.parse import urlparse
+import json
+
+
+def send(msg):
+    print(msg, end='', file=sys.stdout, flush=True)
+
+
+def pull_repo(wdir, url):
+    synced = wdir / 'synced'
+    sync_dir = wdir / 'sync'
+    lsjson = subprocess.run([
+        'rclone', 'lsjson', '{}:{}'.format(url.netloc, url.path),
+        '--files-only', '--no-modtime', '--hash'],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    print('LSJSOB', lsjson, file=sys.stderr)
+    if lsjson.returncode:
+        # ls went wrong, nothing to sync
+        return
+    ls = {i['Path']: i for i in json.loads(lsjson.stdout)}
+    if 'repo.7z' not in ls:
+        return
+    if synced.exists():
+        last_hashes = json.load(synced.open())
+        if any(ls['repo.7z']['Hashes'].get(k, None) == v
+                for k, v in last_hashes.items()):
+            # local sync matches remote situation
+            return
+    copy_repo = subprocess.run([
+        'rclone', 'copy', '{}:{}/repo.7z'.format(url.netloc, url.path),
+        str(sync_dir)],
+    )
+    synced.write_text(json.dumps(ls['repo.7z']['Hashes']))
+
+    sevenz = subprocess.run([
+        '7z', 'x', str(sync_dir / 'repo.7z')],
+        cwd=str(wdir),
+        stdout=subprocess.PIPE,
+    )
+    if not sevenz.returncode:
+        (sync_dir / 'repo.7z').unlink()
+
+    print('PROC', sevenz, file=sys.stderr)
+
+
+def format_refs(repo_dir):
+    if not repo_dir.exists():
+        return
+    env = os.environ.copy()
+    env['GIT_DIR'] = str(repo_dir)
+    refs = ''
+    refs += subprocess.run([
+        'git', 'for-each-ref', "--format=%(objectname) %(refname)"],
+        env=env,
+        check=True,
+        stdout=subprocess.PIPE,
+        universal_newlines=True,
+    ).stdout
+    HEAD_ref = subprocess.run([
+        'git', 'symbolic-ref', 'HEAD'],
+        env=env,
+        check=True,
+        stdout=subprocess.PIPE,
+        universal_newlines=True,
+    ).stdout
+    refs += '@{} HEAD\n'.format(HEAD_ref.strip())
+    return refs
+
+
+def list(url):
+    print('CATSTART', file=sys.stderr)
+    cat = subprocess.run([
+        'rclone', 'cat', '{}:{}/refs'.format(url.netloc, url.path)],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        universal_newlines=True,
+    )
+    print('CATEND', cat, file=sys.stderr)
+    if cat.returncode:
+        # listing failed, nothing there
+        return
+    send(cat.stdout)
+
+
+def import_(repo_dir, marks_file, refs, refspec):
+    env = os.environ.copy()
+    env['GIT_DIR'] = str(repo_dir)
+    subprocess.run([
+        'git', 'fast-export',
+        '--import-marks={}'.format(str(marks_file)),
+        '--export-marks={}'.format(str(marks_file)),
+        '--refspec', refspec] + refs,
+        env=env,
+    )
+
+
+def export(wdir, url, marks_file):
+    repo_dir = (wdir / 'repo').resolve()
+    sync_dir = (wdir / 'sync').resolve()
+    if not sync_dir.exists():
+        sync_dir.mkdir()
+    env = os.environ.copy()
+    env['GIT_DIR'] = str(repo_dir)
+    if not repo_dir.exists():
+        repo_dir.mkdir()
+        subprocess.run([
+            'git', 'init', '--bare', '--quiet'],
+            env=env,
+        )
+    # which refs did we have before?
+    before = subprocess.run([
+        'git', 'for-each-ref', "--format= %(refname) %(objectname) "],
+        env=env,
+        check=True,
+        stdout=subprocess.PIPE,
+    ).stdout
+    print('BEFORE', before, file=sys.stderr)
+    # perform actual import
+    subprocess.run([
+        'git', 'fast-import', '--quiet',
+        '--import-marks={}'.format(str(marks_file)),
+        '--export-marks={}'.format(str(marks_file))],
+        env=env,
+    )
+    # which refs do we have now?
+    after = subprocess.run([
+        'git', 'for-each-ref', "--format= %(refname) %(objectname) "],
+        env=env,
+        check=True,
+        stdout=subprocess.PIPE,
+    ).stdout
+    print('AFTER', after, file=sys.stderr)
+    updated_refs = []
+    need_sync = False
+    for line in after.splitlines():
+        if line in before:
+            # no change in ref
+            continue
+        else:
+            updated_refs.append(line.strip().split()[0].decode())
+            need_sync = True
+
+    if not need_sync:
+        return
+    subprocess.run([
+        'git', 'gc'],
+        env=env,
+    )
+    sevenz = subprocess.run([
+        '7z', 'u', str(sync_dir / 'repo.7z'), 'repo'],
+        cwd=str(wdir),
+        stdout=subprocess.PIPE,
+    )
+    print('7Z', sevenz, file=sys.stderr)
+    (sync_dir / 'refs').write_text(
+        format_refs(repo_dir))
+
+    sync_repo = subprocess.run([
+        'rclone', 'sync', str(sync_dir),
+        '{}:{}'.format(url.netloc, url.path)],
+    )
+    for ref in updated_refs:
+        print('ok {}'.format(ref))
+
+
+
+def main():
+    if len(sys.argv) < 3:
+        raise ValueError("Usage: git-remote-rclone REMOTE-NAME URL")
+
+    remote, url = sys.argv[1:3]
+    url = urlparse(url)
+
+    # no fallback, must be present
+    gitdir = os.environ['GIT_DIR']
+
+    wdir = Path(gitdir, 'rclone', remote)
+    wdir.mkdir(parents=True, exist_ok=True)
+    marks_git = wdir / "git.marks"
+    marks_git.touch()
+    marks_rclone = wdir / "rclone.marks"
+    marks_rclone.touch()
+
+    refspec = "refs/heads/*:refs/rclone/{}/*".format(remote)
+
+    print('REMOTE', remote, file=sys.stderr)
+    print('URL', url, file=sys.stderr)
+    print('WDIR', wdir, file=sys.stderr)
+
+    for line in sys.stdin:
+        print('LINE', repr(line), file=sys.stderr)
+
+        if line == '\n':
+            return
+        elif line == 'capabilities\n':
+            send(
+                'import\n'
+                'export\n'
+                'refspec {refspec}\n'
+                '*import-marks {marks}\n'
+                '*export-marks {marks}\n'
+                'signed-tags\n'
+                '\n'.format(
+                    refspec=refspec,
+                    marks=str(marks_git))
+            )
+        elif line == 'list\n':
+            list(url)
+            send(
+                '\n'
+            )
+        elif line.startswith('import '):
+            pull_repo(wdir, url)
+            refs = [line[7:].strip()]
+            while True:
+                line = sys.stdin.readline()
+                if not line.startswith('import '):
+                    break
+                refs.append(line[7:].strip())
+            send(
+                'feature import-marks={marks}\n'
+                'feature export-marks={marks}\n'
+                'feature done\n'.format(
+                    marks=str(marks_git))
+            )
+            print('IMP', repr(refs), file=sys.stderr)
+
+            import_(wdir / 'repo', marks_rclone, refs, refspec)
+            send('done\n')
+        elif line == 'export\n':
+            pull_repo(wdir, url)
+            export(wdir, url, marks_rclone)
+            send(
+                '\n'
+            )
+        else:
+            print('UNKNOWN COMMAND', file=sys.stderr)
+            return
+
+
+if __name__ == '__main__':
+    main()
